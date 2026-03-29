@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>好奇心日报 阅读器</title>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -206,77 +207,95 @@
   const params   = new URLSearchParams(location.search);
   const bookFile = params.get('book');
 
-  if (!bookFile) {
-    location.href = 'index.html';
+  if (!bookFile) { location.href = 'index.html'; }
+
+  const title = bookFile.replace('.epub', '');
+  document.title = title + ' — 好奇心日报';
+  document.getElementById('book-title').textContent = title;
+
+  function hideLoading() {
+    document.getElementById('loading').classList.add('hidden');
   }
 
-  // 更新标题
-  document.title = bookFile.replace('.epub', '') + ' — 好奇心日报';
-  document.getElementById('book-title').textContent = bookFile.replace('.epub', '');
-
-  const book      = ePub(bookFile);
-  const rendition = book.renderTo('viewer', {
-    width: '100%',
-    height: '100%',
-    spread: 'none',
-  });
-
-  rendition.display().then(() => {
-    document.getElementById('loading').classList.add('hidden');
-  }).catch(err => {
-    showError('EPUB 加载失败：' + err.message);
-  });
-
-  // 目录
-  book.loaded.navigation.then(nav => {
-    const select = document.getElementById('toc-select');
-    select.innerHTML = '<option value="">— 目录 —</option>';
-    nav.toc.forEach(item => {
-      const opt = document.createElement('option');
-      opt.value = item.href;
-      opt.textContent = item.label.trim();
-      select.appendChild(opt);
-    });
-    select.addEventListener('change', () => {
-      if (select.value) rendition.display(select.value);
-    });
-  });
-
-  // 进度
-  book.ready.then(() => {
-    book.locations.generate(1024);
-  });
-
-  rendition.on('relocated', location => {
-    const pct = book.locations.percentageFromCfi(location.start.cfi);
-    if (pct !== undefined) {
-      const p = Math.round(pct * 100);
-      document.getElementById('progress-bar').style.width = p + '%';
-      document.getElementById('progress-label').textContent = p + '%';
-    }
-  });
-
-  // 翻页
-  document.getElementById('btn-prev').addEventListener('click', () => rendition.prev());
-  document.getElementById('btn-next').addEventListener('click', () => rendition.next());
-
-  // 键盘
-  document.addEventListener('keydown', e => {
-    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   rendition.prev();
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown')  rendition.next();
-  });
-
-  // iframe 内键盘事件也透传
-  rendition.on('keydown', e => {
-    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   rendition.prev();
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown')  rendition.next();
-  });
-
   function showError(msg) {
-    document.getElementById('loading').classList.add('hidden');
+    hideLoading();
     const el = document.getElementById('error-msg');
-    el.innerHTML = `<div>⚠️ ${msg}</div><a href="index.html" style="color:#555;font-size:.8rem">← 返回列表</a>`;
+    el.innerHTML = `<div>⚠️ ${msg}</div>
+      <a href="index.html" style="color:#555;font-size:.8rem">← 返回列表</a>`;
     el.classList.add('visible');
+  }
+
+  // 自行 fetch，把 ArrayBuffer 直接传给 epub.js，绕过其内部 URL 处理
+  // encodeURIComponent 处理中文文件名和空格
+  fetch(encodeURIComponent(bookFile))
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.arrayBuffer();
+    })
+    .then(buffer => openBook(buffer))
+    .catch(err => showError('文件加载失败：' + err.message));
+
+  function openBook(buffer) {
+    const book = ePub(buffer);
+
+    const rendition = book.renderTo('viewer', {
+      width: '100%',
+      height: '100%',
+      spread: 'none',
+      flow: 'paginated',
+    });
+
+    const loadingTimeout = setTimeout(hideLoading, 10000);
+
+    rendition.on('rendered', () => {
+      clearTimeout(loadingTimeout);
+      hideLoading();
+    });
+
+    rendition.display().catch(err => {
+      clearTimeout(loadingTimeout);
+      showError('渲染失败：' + (err && err.message || err));
+    });
+
+    // 目录
+    book.loaded.navigation.then(nav => {
+      const select = document.getElementById('toc-select');
+      select.innerHTML = '<option value="">— 目录 —</option>';
+      (nav.toc || []).forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = item.href;
+        opt.textContent = item.label.trim();
+        select.appendChild(opt);
+      });
+      select.addEventListener('change', () => {
+        if (select.value) rendition.display(select.value);
+      });
+    }).catch(() => {});
+
+    // 进度
+    book.ready.then(() => book.locations.generate(1024)).then(() => {
+      rendition.on('relocated', location => {
+        const pct = book.locations.percentageFromCfi(location.start.cfi);
+        if (pct != null) {
+          const p = Math.round(pct * 100);
+          document.getElementById('progress-bar').style.width = p + '%';
+          document.getElementById('progress-label').textContent = p + '%';
+        }
+      });
+    }).catch(() => {});
+
+    // 翻页
+    document.getElementById('btn-prev').addEventListener('click', () => rendition.prev());
+    document.getElementById('btn-next').addEventListener('click', () => rendition.next());
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')  rendition.prev();
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') rendition.next();
+    });
+    rendition.on('keydown', e => {
+      if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')  rendition.prev();
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') rendition.next();
+    });
   }
 </script>
 </body>
